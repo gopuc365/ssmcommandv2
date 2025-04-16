@@ -1,0 +1,147 @@
+version: 2.1
+
+orbs:
+  aws-cli: circleci/aws-cli@0.1.18
+  terraform: circleci/terraform@3.6.0
+
+working_directory: ~/gops-utils
+
+parameters:
+  script_file:
+    type: string
+    default: ""
+  commandline_args:
+    type: string
+    default: ""
+  environment:
+    type: enum
+    enum:
+      - staging
+      - sandbox
+      - production
+      - ""
+    default: ""
+  ec2_instance_id:
+    type: string
+    default: ""
+  ssm_command:
+    type: string
+    default: ""
+  aws_region:
+    type: string
+    default: "us-east-1"
+
+jobs:
+  run_script:
+    docker:
+      - image: cimg/python:3.8
+    working_directory: ~/gops-utils
+    parameters:
+      dry-run:
+        type: string
+        default: ""
+    steps:
+      - checkout
+      - run:
+          name: Install awscli
+          command: |
+            pip install awscli
+            aws --version
+      - run:
+          name: Configure AWS CLI
+          command: |
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+            aws configure set default.region $AWS_DEFAULT_REGION
+      - run:
+          name: Verify AWS CLI Access
+          command: |
+            aws sts get-caller-identity --output json | jq '{ 
+            UserId: ( .UserId | sub(".*(?=.{4}$)"; "****")), 
+            Account: ( .Account | sub(".*(?=.{4}$)"; "****")),
+            Arn: ( .Arn | sub("(?<=arn:aws:sts::)[0-9]+(?=:.*)"; "****"))}'
+      - run:
+          name: Create artifacts directory
+          command: |
+            mkdir -p /tmp/artifacts
+            echo "Created artifacts directory at /tmp/artifacts"
+            echo "CIRCLE_ARTIFACTS=/tmp/artifacts" >> "$BASH_ENV"
+            source "$BASH_ENV" # Ensure the variable is available in this step
+      - run:
+          name: Execute script with args
+          command: |
+            pip install uv
+            pip install boto3
+            echo "Parameters: << pipeline.parameters.script_file >>, << pipeline.parameters.commandline_args >>, << parameters.dry-run >>"
+            uv run scripts/<< pipeline.parameters.script_file >> << pipeline.parameters.commandline_args >> << parameters.dry-run >>
+      - store_artifacts:
+          path: /tmp/artifacts
+          destination: artifacts
+
+  run-ssm-command:
+    docker:
+      - image: cimg/python:3.10
+    parameters:
+      ec2_instance_id:
+        type: string
+      ssm_command:
+        type: string
+      aws_region:
+        type: string
+      script_file:
+        type: string
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: |
+            curl -Ls https://astral.sh/uv/install.sh | bash
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
+            source $BASH_ENV
+      - run:
+          name: Install boto3 using uv
+          command: |
+            uv venv
+            uv pip install boto3
+      - run:
+          name: Run Python script with uv
+          command: |
+            uv run python "./scripts/runSSM/<< parameters.script_file >>" \
+              --instance-id "<< parameters.ec2_instance_id >>" \
+              --command "<< parameters.ssm_command >>" \
+              --region "<< parameters.aws_region >>"
+
+workflows:
+  version: 2
+  staging:
+    when: pipeline.parameters.environment == "staging"
+    jobs:
+      - run_script:
+          context: gopsaws-staging
+          name: run_staging_dry_run
+          dry-run: --dry-run
+      - approve-staging:
+          context: gopsaws-staging
+          type: approval
+          requires:
+            - run_staging_dry_run
+          filters:
+            branches:
+              only: main
+      - run_script:
+          context: gopsaws-staging
+          name: run_staging
+          requires:
+            - approve-staging
+          filters:
+            branches:
+              only: main
+
+  run-command:
+    jobs:
+      - run-ssm-command:
+          context: gopsaws-staging
+          script_file: << pipeline.parameters.script_file >>
+          ec2_instance_id: << pipeline.parameters.ec2_instance_id >>
+          ssm_command: << pipeline.parameters.ssm_command >>
+          aws_region: << pipeline.parameters.aws_region >>
