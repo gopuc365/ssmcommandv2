@@ -73,7 +73,7 @@ jobs:
             pip install uv
             pip install boto3
             echo "Parameters: << pipeline.parameters.script_file >>, << pipeline.parameters.commandline_args >>, << parameters.dry-run >>"
-            uv run scripts/<< pipeline.parameters.script_file >> << pipeline.parameters.commandline_args >> << parameters.dry-run >>
+            uv run scripts/runSSM/<< pipeline.parameters.script_file >> << pipeline.parameters.commandline_args >> << parameters.dry-run >>
       - store_artifacts:
           path: /tmp/artifacts
           destination: artifacts
